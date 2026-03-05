@@ -46,10 +46,8 @@ extern "C" {
 
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
-/* USER CODE BEGIN EM */
 #define MIDI_IN_PORTS_NUM   0x01 // Specify input ports number of your device
 #define MIDI_OUT_PORTS_NUM  0x01 // Specify output ports number of your device
-
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/
@@ -88,6 +86,14 @@ void Error_Handler(void);
 #define BOOT1_GPIO_Port GPIOB
 #define CLK_IN_Pin GPIO_PIN_10
 #define CLK_IN_GPIO_Port GPIOB
+#define BTN_WAVE_Pin GPIO_PIN_11
+#define BTN_WAVE_GPIO_Port GPIOB
+#define BTN_WAVE_EXTI_IRQn EXTI15_10_IRQn
+#define SR_LATCH_Pin GPIO_PIN_13
+#define SR_LATCH_GPIO_Port GPIOB
+#define BTN_LFO_Pin GPIO_PIN_15
+#define BTN_LFO_GPIO_Port GPIOB
+#define BTN_LFO_EXTI_IRQn EXTI15_10_IRQn
 #define LD4_Pin GPIO_PIN_12
 #define LD4_GPIO_Port GPIOD
 #define LD3_Pin GPIO_PIN_13
