@@ -73,15 +73,6 @@ static uint32_t last_lfo_tick  = 0;
  */
 void Buttons_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-
-    GPIO_InitStruct.Pin  = BTN_WAVE_Pin | BTN_LFO_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;
-    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
     HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 }
@@ -118,7 +109,6 @@ void Buttons_HandleEXTI(uint16_t GPIO_Pin)
         }
     }
 }
-
 /* ================================================================
  * ADC + controles
  * ================================================================ */
