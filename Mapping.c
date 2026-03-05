@@ -46,13 +46,13 @@ void Parameter_Update(void)
     lfo_params.depth        = map_param(ctrl_norm[CTRL_DEPTH],
                                         0.0f, 1.0f, PARAM_LFO_DEPTH);
     adsr_params.attack      = map_param(ctrl_norm[CTRL_ATTACK],
-                                        0.001f, 5.0f, PARAM_TIME);
+                                        0.001f, 2.0f, PARAM_TIME);
     adsr_params.decay       = map_param(ctrl_norm[CTRL_DECAY],
-                                        0.001f, 5.0f, PARAM_TIME);
+                                        0.001f, 2.0f, PARAM_TIME);
     adsr_params.sustain     = map_param(ctrl_norm[CTRL_SUSTAIN],
                                         0.0001f, 1.0f, PARAM_GAIN);
     adsr_params.release     = map_param(ctrl_norm[CTRL_RELEASE],
-                                        0.01f, 8.0f, PARAM_TIME);
+                                        0.01f, 3.0f, PARAM_TIME);
 }
 
 /* ================================================================
