@@ -110,7 +110,39 @@ void MapNoteToLED(uint8_t note, uint8_t velocity) {
 }
 
 
-/* Callback MIDI ------------------------------------------------------------*/
+// Función auxiliar: roba la voz más "vieja" en release o la más silenciosa
+static Voice* StealVoice(void)
+{
+    // Primero buscar una voz en release
+    Voice *best = NULL;
+    float minEnv = 2.0f;
+
+    for (int i = 0; i < MAX_VOICES; i++)
+    {
+        if (voices[i].envState == ENV_RELEASE)
+        {
+            if (voices[i].env < minEnv)
+            {
+                minEnv = voices[i].env;
+                best   = &voices[i];
+            }
+        }
+    }
+    if (best) return best;
+
+    // Si no hay ninguna en release, robar la de menor amplitud
+    minEnv = 2.0f;
+    for (int i = 0; i < MAX_VOICES; i++)
+    {
+        if (voices[i].env < minEnv)
+        {
+            minEnv = voices[i].env;
+            best   = &voices[i];
+        }
+    }
+    return best;
+}
+
 void USBD_MIDI_OnPacketsReceived(uint8_t *data, uint8_t len)
 {
     while (len >= 4)
@@ -119,43 +151,43 @@ void USBD_MIDI_OnPacketsReceived(uint8_t *data, uint8_t len)
         uint8_t note = data[2];
         uint8_t vel  = data[3];
 
-        if (msg == 0x09 && vel > 0)  // Note On
+        if (msg == 0x09 && vel > 0)
         {
-            // Buscar si la nota ya está sonando (retrigger)
-            int found = 0;
+            Voice *target = NULL;
+
             for (int i = 0; i < MAX_VOICES; i++)
             {
                 if (voices[i].note == note && voices[i].active)
                 {
-                    Synth_NoteOn(&voices[i], note,
-                                 NoteToFreq(note) / F_SAMPLE);
-                    found = 1;
+                    target = &voices[i];
                     break;
                 }
             }
-            // Si no estaba sonando, buscar voz libre
-            if (!found)
+
+            if (!target)
             {
                 for (int i = 0; i < MAX_VOICES; i++)
                 {
                     if (!voices[i].active)
                     {
-                        Synth_NoteOn(&voices[i], note,
-                                     NoteToFreq(note) / F_SAMPLE);
+                        target = &voices[i];
                         break;
                     }
                 }
             }
+
+            if (!target)
+                target = StealVoice();
+
+            if (target)
+                Synth_NoteOn(target, note, NoteToFreq(note) / F_SAMPLE);
         }
-        else if (msg == 0x08 || (msg == 0x09 && vel == 0))  // Note Off
+        else if (msg == 0x08 || (msg == 0x09 && vel == 0))
         {
             for (int i = 0; i < MAX_VOICES; i++)
             {
                 if (voices[i].active && voices[i].note == note)
-                {
                     Synth_NoteOff(&voices[i]);
-                    break;
-                }
             }
         }
 
@@ -164,7 +196,6 @@ void USBD_MIDI_OnPacketsReceived(uint8_t *data, uint8_t len)
         len  -= 4;
     }
 }
-
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     Buttons_HandleEXTI(GPIO_Pin);
@@ -245,8 +276,9 @@ int main(void)
   // TIM6 dispara Controls_Process a 100 Hz
   HAL_TIM_Base_Start_IT(&htim6);
 
-
-
+  // GARANTIZAR prioridad EXTI al final de toda la inicialización
+  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -260,18 +292,12 @@ int main(void)
 	    {
 	        btn_wave_pressed = 0;
 	        StateManager_NextWave();
-	        printf("Wave: %s | LFO: %s\n",
-	            StateManager_GetWaveName(),
-	            StateManager_GetLFOName());
 	    }
 
 	    if (btn_lfo_pressed)
 	    {
 	        btn_lfo_pressed = 0;
 	        StateManager_NextLFO();
-	        printf("Wave: %s | LFO: %s\n",
-	            StateManager_GetWaveName(),
-	            StateManager_GetLFOName());
 	    }
   }
   /* USER CODE END 3 */
@@ -595,19 +621,16 @@ static void MX_TIM6_Init(void)
   */
 static void MX_DMA_Init(void)
 {
+    __HAL_RCC_DMA2_CLK_ENABLE();
+    __HAL_RCC_DMA1_CLK_ENABLE();
 
-  /* DMA controller clock enable */
-  __HAL_RCC_DMA2_CLK_ENABLE();
-  __HAL_RCC_DMA1_CLK_ENABLE();
+    // Audio DMA — máxima prioridad (crítico para no tener glitches)
+    HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
 
-  /* DMA interrupt init */
-  /* DMA1_Stream5_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
-  /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
-
+    // ADC DMA
+    HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 2, 0);
+    HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 }
 
 /**
@@ -720,8 +743,6 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(MEMS_INT2_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI15_10_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(EXTI15_10_IRQn);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -734,7 +755,6 @@ void renderAudio(int16_t *buf, uint16_t frames)
 {
     for (uint16_t i = 0; i < frames; i++)
     {
-        // LFO avanza una vez por sample, globalmente
         LFO_Tick();
 
         float s = 0.0f;
@@ -750,10 +770,6 @@ void renderAudio(int16_t *buf, uint16_t frames)
         buf[2*i + 1] = sampleOut;
     }
 }
-
-
-
-
 
 void HAL_I2S_TxHalfCpltCallback(I2S_HandleTypeDef *hi2s3)
 {
