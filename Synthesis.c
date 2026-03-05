@@ -10,7 +10,7 @@
 #include <math.h>
 
 #define PI          3.14159f
-#define ENV_TARGET  0.0001f     // -80dB, umbral para considerar silencio
+#define ENV_TARGET  0.01f     // -80dB, umbral para considerar silencio
 
 // Variables globales
 Voice    voices[MAX_VOICES];
@@ -97,6 +97,7 @@ void Synth_NoteOn(Voice *v, uint8_t note, float dPhase)
     v->dPhase       = dPhase;
     v->phase        = 0.0f;
     v->active       = 1;
+    v->env          = 0.0f;   // <- forzar reset aunque sea retrigger
     v->envState     = ENV_ATTACK;
     v->attackCoef   = 1.0f / (adsr_params.attack  * F_SAMPLE);
     v->decayCoef    = calcCoef(adsr_params.decay);
@@ -209,13 +210,14 @@ float ADSR_Apply(Voice *v, float sample)
 
         case ENV_RELEASE:
             v->env *= v->releaseCoef;
-            if (v->env <= ENV_TARGET)
+            if (v->env <= ENV_TARGET || v->env < 0.0001f)
             {
                 v->env      = 0.0f;
                 v->envState = ENV_IDLE;
                 v->active   = 0;
             }
             break;
+
 
         case ENV_IDLE:
         default:
