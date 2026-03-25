@@ -10,12 +10,15 @@
 #include <math.h>
 
 #define PI          3.14159f
-#define ENV_TARGET  0.01f     // -80dB, umbral para considerar silencio
+#define ENV_TARGET  0.0001f     // -80dB, umbral para considerar silencio
+#define CUTOFF_SMOOTH_ALPHA  0.005f   // antes 0.02f — suavizado más lento
+#define COEF_UPDATE_THRESH   20.0f    // antes 2.0f  — recalcula solo si cambia >20Hz
 
 // Variables globales
 Voice    voices[MAX_VOICES];
 static   WaveType waveType = WAVE_SAW;
 LFOState lfo_state = {0.0f, 0.0f};
+float sine_table[SINE_TABLE_SIZE];
 
 
 // ─── Coeficiente multiplicativo ──────────────────────────────────────────────
@@ -58,26 +61,37 @@ void LFO_Tick(void)
     if (lfo_state.phase >= 1.0f)
         lfo_state.phase -= 1.0f;
 
-    lfo_state.value = sinf(2.0f * PI * lfo_state.phase);
+    // Usar tabla seno en lugar de sinf()
+    uint32_t idx = (uint32_t)(lfo_state.phase * SINE_TABLE_SIZE)
+                   & (SINE_TABLE_SIZE - 1);
+    lfo_state.value = sine_table[idx];
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 void Synth_Init(void)
 {
+    for (int i = 0; i < SINE_TABLE_SIZE; i++)
+        sine_table[i] = sinf(2.0f * PI * i / SINE_TABLE_SIZE);
+
     for (int i = 0; i < MAX_VOICES; i++)
     {
-        voices[i].active       = 0;
-        voices[i].phase        = 0.0f;
-        voices[i].dPhase       = 0.0f;
-        voices[i].note         = 0;
-        voices[i].env          = 0.0f;
-        voices[i].envState     = ENV_IDLE;
-        voices[i].attackCoef   = 0.0f;
-        voices[i].decayCoef    = 0.0f;
-        voices[i].sustainLevel = 0.0f;
-        voices[i].releaseCoef  = 0.0f;
-        voices[i].z1           = 0.0f;
-        voices[i].z2           = 0.0f;
+        voices[i].active         = 0;
+        voices[i].phase          = 0.0f;
+        voices[i].dPhase         = 0.0f;
+        voices[i].note           = 0;
+        voices[i].env            = 0.0f;
+        voices[i].envState       = ENV_IDLE;
+        voices[i].attackCoef     = 0.0f;
+        voices[i].decayCoef      = 0.0f;
+        voices[i].sustainLevel   = 0.0f;
+        voices[i].releaseCoef    = 0.0f;
+        voices[i].z1             = 0.0f;
+        voices[i].z2             = 0.0f;
+        voices[i].cutoff_smooth  = filter_params.cutoff;
+        voices[i].last_cutoff    = filter_params.cutoff;
+        voices[i].last_resonance = filter_params.resonance;
+        voices[i].releaseGuard   = 0;  // <--
+
         calcFilterCoefs(&voices[i],
                         filter_params.cutoff,
                         filter_params.resonance);
@@ -93,18 +107,28 @@ void Synth_SetWaveType(WaveType type)
 // ─── Note On ─────────────────────────────────────────────────────────────────
 void Synth_NoteOn(Voice *v, uint8_t note, float dPhase)
 {
-    v->note         = note;
-    v->dPhase       = dPhase;
-    v->phase        = 0.0f;
-    v->active       = 1;
-    v->env          = 0.0f;   // <- forzar reset aunque sea retrigger
-    v->envState     = ENV_ATTACK;
-    v->attackCoef   = 1.0f / (adsr_params.attack  * F_SAMPLE);
-    v->decayCoef    = calcCoef(adsr_params.decay);
-    v->sustainLevel = adsr_params.sustain;
-    v->releaseCoef  = calcCoef(adsr_params.release);
-    v->z1           = 0.0f;
-    v->z2           = 0.0f;
+    EnvState prevState = v->envState;  // guardar estado ANTES de modificar
+
+    v->note           = note;
+    v->dPhase         = dPhase;
+    v->active         = 1;
+    v->env            = 0.0f;
+    v->envState       = ENV_ATTACK;
+    v->attackCoef     = 1.0f / (adsr_params.attack * F_SAMPLE);
+    v->decayCoef      = calcCoef(adsr_params.decay);
+    v->sustainLevel   = adsr_params.sustain;
+    v->releaseCoef    = calcCoef(adsr_params.release);
+    v->z1             = 0.0f;
+    v->z2             = 0.0f;
+    v->cutoff_smooth  = filter_params.cutoff;
+    v->last_cutoff    = filter_params.cutoff;
+    v->last_resonance = filter_params.resonance;
+    v->releaseGuard   = 0;
+
+    // Solo resetea la fase si la voz estaba completamente idle
+    if (prevState == ENV_IDLE)
+        v->phase = 0.0f;
+
     calcFilterCoefs(v, filter_params.cutoff, filter_params.resonance);
 }
 
@@ -115,6 +139,9 @@ void Synth_NoteOff(Voice *v)
     {
         v->envState    = ENV_RELEASE;
         v->releaseCoef = calcCoef(adsr_params.release);
+        // FIX: garantizar que releaseCoef nunca sea 0 ni 1
+        if (v->releaseCoef <= 0.0f || v->releaseCoef >= 1.0f)
+            v->releaseCoef = calcCoef(0.01f);
     }
 }
 
@@ -132,14 +159,7 @@ void Synth_UpdateActiveVoices(void)
             if (voices[i].envState == ENV_ATTACK)
                 voices[i].attackCoef = 1.0f / (adsr_params.attack * F_SAMPLE);
 
-            // Solo actualizar filtro si el LFO no está modulando el cutoff
-            // (si lo modula, se recalcula en cada sample dentro de Filter_Apply)
-            if (synth_state.lfo != LFO_CUTOFF && synth_state.lfo != LFO_RESONANCE)
-            {
-                calcFilterCoefs(&voices[i],
-                                filter_params.cutoff,
-                                filter_params.resonance);
-            }
+            // ELIMINADO: calcFilterCoefs — ya no va aquí
         }
     }
 }
@@ -147,13 +167,11 @@ void Synth_UpdateActiveVoices(void)
 // ─── Oscilador ───────────────────────────────────────────────────────────────
 float Oscillator_Generate(Voice *v)
 {
-    float sample  = 0.0f;
-    float dPhase  = v->dPhase;
+    float sample = 0.0f;
+    float dPhase = v->dPhase;
 
-    // LFO_PITCH — modula la frecuencia del oscilador
     if (synth_state.lfo == LFO_PITCH)
     {
-        // El LFO desafina hasta ±1 semitono (factor 2^(1/12) ≈ 1.0595)
         float pitch_mod = 1.0f + lfo_params.depth * lfo_state.value * 0.0595f;
         if (pitch_mod < 0.01f) pitch_mod = 0.01f;
         dPhase *= pitch_mod;
@@ -161,9 +179,13 @@ float Oscillator_Generate(Voice *v)
 
     switch (waveType)
     {
-        case WAVE_SINE:
-            sample = sinf(2.0f * PI * v->phase);
+        case WAVE_SINE: {
+            // NUEVO: lookup table en lugar de sinf()
+            uint32_t idx = (uint32_t)(v->phase * SINE_TABLE_SIZE)
+                           & (SINE_TABLE_SIZE - 1);
+            sample = sine_table[idx];
             break;
+        }
         case WAVE_SQUARE:
             sample = (v->phase < 0.5f) ? 1.0f : -1.0f;
             break;
@@ -210,14 +232,18 @@ float ADSR_Apply(Voice *v, float sample)
 
         case ENV_RELEASE:
             v->env *= v->releaseCoef;
-            if (v->env <= ENV_TARGET || v->env < 0.0001f)
+            // FIX: doble condición de salida — por umbral Y por contador de seguridad
+            v->releaseGuard++;
+            if (v->env <= ENV_TARGET
+                || v->env < 0.0001f
+                || v->releaseGuard > (uint32_t)(5.0f * F_SAMPLE))  // máx 5 s
             {
-                v->env      = 0.0f;
-                v->envState = ENV_IDLE;
-                v->active   = 0;
+                v->env          = 0.0f;
+                v->envState     = ENV_IDLE;
+                v->active       = 0;
+                v->releaseGuard = 0;
             }
             break;
-
 
         case ENV_IDLE:
         default:
@@ -228,7 +254,6 @@ float ADSR_Apply(Voice *v, float sample)
     // LFO_AMPLITUDE — modula el nivel de salida
     if (synth_state.lfo == LFO_AMPLITUDE)
     {
-        // El LFO varía la amplitud entre 0 y 1 según depth
         float amp_mod = 1.0f - lfo_params.depth * (lfo_state.value * 0.5f + 0.5f);
         if (amp_mod < 0.0f) amp_mod = 0.0f;
         return sample * v->env * amp_mod;
@@ -240,40 +265,47 @@ float ADSR_Apply(Voice *v, float sample)
 // ─── Filtro ──────────────────────────────────────────────────────────────────
 float Filter_Apply(Voice *v, float sample)
 {
-    float cutoff_mod    = filter_params.cutoff;
+    float cutoff_target = filter_params.cutoff;
     float resonance_mod = filter_params.resonance;
 
     switch (synth_state.lfo)
     {
         case LFO_CUTOFF:
-            // Modula el cutoff hasta una octava arriba o abajo
-            cutoff_mod = filter_params.cutoff
-                       + lfo_params.depth
-                       * lfo_state.value
-                       * filter_params.cutoff;
+            cutoff_target = filter_params.cutoff *
+                            (1.0f + lfo_params.depth * lfo_state.value);
+            if (cutoff_target < 20.0f)    cutoff_target = 20.0f;
+            if (cutoff_target > 18000.0f) cutoff_target = 18000.0f;
             break;
 
         case LFO_RESONANCE:
-            // Modula la resonancia entre 0.5 y su valor máximo actual
-            resonance_mod = filter_params.resonance
-                          + lfo_params.depth
-                          * lfo_state.value
-                          * filter_params.resonance;
+            resonance_mod = filter_params.resonance *
+                            (1.0f + lfo_params.depth * lfo_state.value);
+            if (resonance_mod < 0.5f)  resonance_mod = 0.5f;
+            if (resonance_mod > 20.0f) resonance_mod = 20.0f;
             break;
 
         default:
-            // LFO_AMPLITUDE y LFO_PITCH no afectan el filtro
             break;
     }
 
-    // Protección
-    if (cutoff_mod    < 20.0f)    cutoff_mod    = 20.0f;
-    if (cutoff_mod    > 20000.0f) cutoff_mod    = 20000.0f;
-    if (resonance_mod < 0.5f)     resonance_mod = 0.5f;
-    if (resonance_mod > 20.0f)    resonance_mod = 20.0f;
+    // Suavizado exponencial del cutoff — sin trig, solo una MAC
+    v->cutoff_smooth += CUTOFF_SMOOTH_ALPHA *
+                        (cutoff_target - v->cutoff_smooth);
 
-    calcFilterCoefs(v, cutoff_mod, resonance_mod);
+    // Recalcular coefs SOLO si el cambio es significativo
+    float diff_c = v->cutoff_smooth - v->last_cutoff;
+    if (diff_c < 0.0f) diff_c = -diff_c;
+    float diff_r = resonance_mod - v->last_resonance;
+    if (diff_r < 0.0f) diff_r = -diff_r;
 
+    if (diff_c > COEF_UPDATE_THRESH || diff_r > 0.01f)
+    {
+        calcFilterCoefs(v, v->cutoff_smooth, resonance_mod);
+        v->last_cutoff    = v->cutoff_smooth;
+        v->last_resonance = resonance_mod;
+    }
+
+    // Biquad directo — solo MACs, se ejecuta cada sample
     float out = v->b0 * sample + v->z1;
     v->z1     = v->b1 * sample - v->a1 * out + v->z2;
     v->z2     = v->b2 * sample - v->a2 * out;
