@@ -50,10 +50,10 @@ extern ADSRParams   adsr_params;
  * STATE MANAGER — Tipo de onda y parámetro objetivo del LFO
  * ================================================================ */
 typedef enum {
-    LFO_CUTOFF = 0,
-    LFO_RESONANCE,
-    LFO_AMPLITUDE,
+    LFO_AMPLITUDE = 0,
     LFO_PITCH,
+    LFO_CUTOFF,
+    LFO_RESONANCE,
     LFO_COUNT
 } LFOTarget;
 
