@@ -139,6 +139,18 @@ void Controls_Process(void)
             ctrl_stable[i] = ctrl_smooth[i];
 
         // 3. Normalización
-        ctrl_norm[i] = ctrl_stable[i] / ADC_MAX;
+        float norm = ctrl_stable[i] / ADC_MAX;
+
+        // Canales invertidos por conexión física
+        if (i == CTRL_ATTACK  ||
+            i == CTRL_DECAY   ||
+            i == CTRL_SUSTAIN ||
+            i == CTRL_RELEASE ||
+            i == CTRL_VOLUME)
+        {
+            norm = 1.0f - norm;
+        }
+
+        ctrl_norm[i] = norm;
     }
 }
