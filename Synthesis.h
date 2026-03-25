@@ -48,9 +48,17 @@ typedef struct {
     float    releaseCoef;
 
     // Filtro biquad
-    float z1, z2;           // variables de estado
-    float b0, b1, b2;       // coeficientes feedforward
-    float a1, a2;           // coeficientes feedback
+    float z1, z2;
+    float b0, b1, b2;
+    float a1, a2;
+
+    // Control de recálculo de coeficientes
+    float    cutoff_smooth;
+    float    last_cutoff;
+    float    last_resonance;
+
+    // Guard de release
+    uint32_t releaseGuard;
 
 } Voice;
 
@@ -64,9 +72,6 @@ extern LFOState lfo_state;
 
 // Variables globales accesibles externamente
 extern Voice voices[MAX_VOICES];
-
-
-
 
 
 // Funciones públicas
@@ -83,4 +88,9 @@ float ADSR_Apply(Voice *v, float sample);
 float Filter_Apply(Voice *v, float sample);
 void LFO_Tick(void);
 
+
+
+// Tabla seno para oscilador eficiente
+#define SINE_TABLE_SIZE 1024
+extern float sine_table[SINE_TABLE_SIZE];
 #endif /* INC_SYNTH_H_ */
