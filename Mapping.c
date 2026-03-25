@@ -55,28 +55,22 @@ void Parameter_Update(void)
                                         0.01f, 3.0f, PARAM_TIME);
 }
 
-/* ================================================================
- * STATE MANAGER
- * ================================================================ */
-SynthState synth_state = {
-    .wave = WAVE_SINE,
-    .lfo  = LFO_CUTOFF
-};
+
 
 // Tabla de máscaras LED por tipo de onda
 static const uint8_t wave_led_mask[4] = {
-    0x02,   // WAVE_SINE     → Q1
-    0x04,   // WAVE_SQUARE   → Q2
-    0x08,   // WAVE_TRIANGLE → Q3
-    0x10,   // WAVE_SAW      → Q4
+    0x02,   // WAVE_SINE     → QB
+    0x01,   // WAVE_SQUARE   → QA
+    0x08,   // WAVE_TRIANGLE → QD
+    0x04,   // WAVE_SAW      → QC
 };
 
 // Tabla de máscaras LED por LFO target
 static const uint8_t lfo_led_mask[LFO_COUNT] = {
-    0x80,   // LFO_CUTOFF    → Q7
-    0x01,   // LFO_RESONANCE → Q0
-    0x20,   // LFO_AMPLITUDE → Q5
-    0x40,   // LFO_PITCH     → Q6
+    0x10,   // LFO_AMPLITUDE → QE
+    0x20,   // LFO_PITCH     → QF
+    0x40,   // LFO_CUTOFF    → QG
+    0x80,   // LFO_RESONANCE → QH
 };
 
 static const char* wave_names[4] = {
@@ -84,13 +78,19 @@ static const char* wave_names[4] = {
 };
 
 static const char* lfo_names[LFO_COUNT] = {
-    "Cutoff", "Resonance", "Amplitude", "Pitch"
+    "Amplitude", "Pitch", "Cutoff", "Resonance"
+};
+
+// Estado inicial
+SynthState synth_state = {
+    .wave = WAVE_SINE,
+    .lfo  = LFO_AMPLITUDE
 };
 
 void StateManager_Init(void)
 {
     synth_state.wave = WAVE_SINE;
-    synth_state.lfo  = LFO_CUTOFF;
+    synth_state.lfo  = LFO_AMPLITUDE;
     Synth_SetWaveType(synth_state.wave);
     ShiftReg_Write(StateManager_GetLEDByte());
 }
