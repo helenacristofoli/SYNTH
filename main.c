@@ -40,6 +40,7 @@
 /* USER CODE BEGIN PD */
 //Sample rate, frames, tone
 #define BUFFER_FRAMES    512
+static volatile uint8_t audio_busy = 0;
 
 /* USER CODE END PD */
 
@@ -113,24 +114,33 @@ void MapNoteToLED(uint8_t note, uint8_t velocity) {
 // Función auxiliar: roba la voz más "vieja" en release o la más silenciosa
 static Voice* StealVoice(void)
 {
-    // Primero buscar una voz en release
     Voice *best = NULL;
     float minEnv = 2.0f;
 
+    // 1. Preferir voces en ENV_RELEASE (las más apagadas primero)
     for (int i = 0; i < MAX_VOICES; i++)
     {
-        if (voices[i].envState == ENV_RELEASE)
+        if (voices[i].envState == ENV_RELEASE && voices[i].env < minEnv)
         {
-            if (voices[i].env < minEnv)
-            {
-                minEnv = voices[i].env;
-                best   = &voices[i];
-            }
+            minEnv = voices[i].env;
+            best   = &voices[i];
         }
     }
     if (best) return best;
 
-    // Si no hay ninguna en release, robar la de menor amplitud
+    // 2. Si no hay en release, preferir SUSTAIN o DECAY (nunca ATTACK)
+    minEnv = 2.0f;
+    for (int i = 0; i < MAX_VOICES; i++)
+    {
+        if (voices[i].envState != ENV_ATTACK && voices[i].env < minEnv)
+        {
+            minEnv = voices[i].env;
+            best   = &voices[i];
+        }
+    }
+    if (best) return best;
+
+    // 3. Último recurso: cualquier voz
     minEnv = 2.0f;
     for (int i = 0; i < MAX_VOICES; i++)
     {
@@ -143,6 +153,7 @@ static Voice* StealVoice(void)
     return best;
 }
 
+
 void USBD_MIDI_OnPacketsReceived(uint8_t *data, uint8_t len)
 {
     while (len >= 4)
@@ -151,10 +162,11 @@ void USBD_MIDI_OnPacketsReceived(uint8_t *data, uint8_t len)
         uint8_t note = data[2];
         uint8_t vel  = data[3];
 
-        if (msg == 0x09 && vel > 0)
+        if (msg == 0x09 && vel > 0)  // Note On
         {
             Voice *target = NULL;
 
+            // 1. Reutilizar voz con la misma nota (retrigger)
             for (int i = 0; i < MAX_VOICES; i++)
             {
                 if (voices[i].note == note && voices[i].active)
@@ -164,6 +176,7 @@ void USBD_MIDI_OnPacketsReceived(uint8_t *data, uint8_t len)
                 }
             }
 
+            // 2. Buscar voz libre
             if (!target)
             {
                 for (int i = 0; i < MAX_VOICES; i++)
@@ -176,19 +189,28 @@ void USBD_MIDI_OnPacketsReceived(uint8_t *data, uint8_t len)
                 }
             }
 
+            // 3. Voice stealing
             if (!target)
                 target = StealVoice();
 
             if (target)
+            {
+                // FIX: deshabilitar interrupciones de audio brevemente
+                // para que renderAudio no lea la voz a medias
+                __disable_irq();
                 Synth_NoteOn(target, note, NoteToFreq(note) / F_SAMPLE);
+                __enable_irq();
+            }
         }
-        else if (msg == 0x08 || (msg == 0x09 && vel == 0))
+        else if (msg == 0x08 || (msg == 0x09 && vel == 0))  // Note Off
         {
+            __disable_irq();
             for (int i = 0; i < MAX_VOICES; i++)
             {
                 if (voices[i].active && voices[i].note == note)
                     Synth_NoteOff(&voices[i]);
             }
+            __enable_irq();
         }
 
         MapNoteToLED(note, vel);
@@ -264,8 +286,10 @@ int main(void)
   HAL_I2S_Transmit_DMA(&hi2s3, (uint16_t *)audioBuffer, 1024);
 
   // Parámetros por defecto antes de primera lectura
-  Parameter_Init();
+
   Controls_Init(&hadc1, &htim6, &hspi1);
+  Parameter_Init();
+
   //Start voices
   Synth_Init();
 
@@ -385,87 +409,42 @@ static void MX_ADC1_Init(void)
     Error_Handler();
   }
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_1;
-  sConfig.Rank = 1;
+  sConfig.Channel = ADC_CHANNEL_2;   // PA2
+  sConfig.Rank = 1;                  // RESONANCE
   sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_2;
-  sConfig.Rank = 2;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  sConfig.Channel = ADC_CHANNEL_3;   // PA3
+  sConfig.Rank = 2;                  // DECAY
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_3;
-  sConfig.Rank = 3;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  sConfig.Channel = ADC_CHANNEL_14;  // PC4
+  sConfig.Rank = 3;                  // RATE
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_8;
-  sConfig.Rank = 4;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  sConfig.Channel = ADC_CHANNEL_9;   // PB1
+  sConfig.Rank = 4;                  // RELEASE
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_9;
-  sConfig.Rank = 5;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  sConfig.Channel = ADC_CHANNEL_11;  // PC1
+  sConfig.Rank = 5;                  // VOLUME
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_11;
-  sConfig.Rank = 6;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  sConfig.Channel = ADC_CHANNEL_12;  // PC2
+  sConfig.Rank = 6;                  // CUTOFF
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_12;
-  sConfig.Rank = 7;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  sConfig.Channel = ADC_CHANNEL_1;   // PA1
+  sConfig.Rank = 7;                  // ATTACK
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_14;
-  sConfig.Rank = 8;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  sConfig.Channel = ADC_CHANNEL_15;  // PC5
+  sConfig.Rank = 8;                  // SUSTAIN
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
 
-  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
-  */
-  sConfig.Channel = ADC_CHANNEL_15;
-  sConfig.Rank = 9;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  sConfig.Channel = ADC_CHANNEL_8;   // PB0
+  sConfig.Rank = 9;                  // DEPTH
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK) Error_Handler();
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
@@ -758,14 +737,30 @@ void renderAudio(int16_t *buf, uint16_t frames)
         LFO_Tick();
 
         float s = 0.0f;
+        int   activeCount = 0;
+
         for (int v = 0; v < MAX_VOICES; v++)
         {
             if (voices[v].active)
+            {
                 s += Synth_RenderVoiceSample(&voices[v]);
+                activeCount++;
+            }
         }
 
-        s /= MAX_VOICES;
-        int16_t sampleOut = (int16_t)(s * 8000);
+        // FIX: dividir sólo entre voces activas para no perder volumen
+        // cuando hay pocas voces, pero evitar clipping con muchas
+        if (activeCount > 1)
+            s /= activeCount;
+
+        // FIX: clamp explícito antes de convertir a int16
+                if      (s >  1.0f) s =  1.0f;
+                else if (s < -1.0f) s = -1.0f;
+
+                // Aplicar volumen
+                s *= ctrl_norm[CTRL_VOLUME];
+
+                int16_t sampleOut = (int16_t)(s * 28000);  // headroom razonable
         buf[2*i]     = sampleOut;
         buf[2*i + 1] = sampleOut;
     }
@@ -809,8 +804,28 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         Parameter_Update();
         Synth_UpdateActiveVoices();
 
-        // LED verde confirma que el timer está corriendo
         HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_12);
+
+        /*     // Diagnóstico — quitar cuando ya no se necesite
+        static uint32_t print_counter = 0;
+        if (++print_counter >= 50)
+        {
+            print_counter = 0;
+            printf("VOL:%4d ATK:%4d DCY:%4d SUS:%4d REL:%4d\r\n",
+                adc_raw[CTRL_VOLUME],
+                adc_raw[CTRL_ATTACK],
+                adc_raw[CTRL_DECAY],
+                adc_raw[CTRL_SUSTAIN],
+                adc_raw[CTRL_RELEASE]);
+            printf("CUT:%4d RES:%4d RAT:%4d DEP:%4d\r\n",
+                adc_raw[CTRL_CUTOFF],
+                adc_raw[CTRL_RESONANCE],
+                adc_raw[CTRL_RATE],
+                adc_raw[CTRL_DEPTH]);
+            printf("WAVE: %s | LFO: %s\r\n",
+                StateManager_GetWaveName(),
+                StateManager_GetLFOName());
+        }*/
     }
 }
 
