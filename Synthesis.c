@@ -20,13 +20,82 @@ static   WaveType waveType = WAVE_SAW;
 LFOState lfo_state = {0.0f, 0.0f};
 float sine_table[SINE_TABLE_SIZE];
 
+volatile VoiceEvent event_queue[EVENT_QUEUE_SIZE];
+volatile uint8_t    event_queue_head = 0;
+volatile uint8_t    event_queue_tail = 0;
 
-// ─── Coeficiente multiplicativo ──────────────────────────────────────────────
-static float calcCoef(float time)
+
+// Procesar cola — llamado desde renderAudio(), dentro de la ISR de audio
+void Synth_ProcessEventQueue(void)
 {
-    if (time <= 0.0f) return 0.0f;
-    return powf(ENV_TARGET, 1.0f / (time * F_SAMPLE));
+    while (event_queue_head != event_queue_tail)
+    {
+        VoiceEvent *ev = (VoiceEvent*)&event_queue[event_queue_head];
+
+        if (!ev->isNoteOff)
+        {
+            // Buscar voz libre o hacer stealing — misma lógica que main.c
+            Voice *target = NULL;
+            for (int i = 0; i < MAX_VOICES; i++)
+            {
+                if (!voices[i].active) { target = &voices[i]; break; }
+            }
+            if (!target) target = StealVoice();
+            if (target) Synth_NoteOn(target, ev->note, ev->dPhase);
+        }
+        else
+        {
+            for (int i = 0; i < MAX_VOICES; i++)
+            {
+                if (voices[i].active && voices[i].note == ev->note)
+                    Synth_NoteOff(&voices[i]);
+            }
+        }
+
+        event_queue_head = (event_queue_head + 1) % EVENT_QUEUE_SIZE;
+    }
 }
+
+
+Voice* StealVoice(void)
+{
+    Voice *best = NULL;
+    float minEnv = 2.0f;
+
+    for (int i = 0; i < MAX_VOICES; i++)
+    {
+        if (voices[i].envState == ENV_RELEASE && voices[i].env < minEnv)
+        {
+            minEnv = voices[i].env;
+            best   = &voices[i];
+        }
+    }
+    if (best) return best;
+
+    minEnv = 2.0f;
+    for (int i = 0; i < MAX_VOICES; i++)
+    {
+        if (voices[i].envState != ENV_ATTACK && voices[i].env < minEnv)
+        {
+            minEnv = voices[i].env;
+            best   = &voices[i];
+        }
+    }
+    if (best) return best;
+
+    minEnv = 2.0f;
+    for (int i = 0; i < MAX_VOICES; i++)
+    {
+        if (voices[i].env < minEnv)
+        {
+            minEnv = voices[i].env;
+            best   = &voices[i];
+        }
+    }
+    return best;
+}
+
+
 
 static void calcFilterCoefs(Voice *v, float cutoff, float Q)
 {
@@ -71,7 +140,7 @@ void LFO_Tick(void)
 void Synth_Init(void)
 {
     for (int i = 0; i < SINE_TABLE_SIZE; i++)
-        sine_table[i] = sinf(2.0f * PI * i / SINE_TABLE_SIZE);
+        sine_table[i] = sinf(2.0f * 3.14159f * i / SINE_TABLE_SIZE);
 
     for (int i = 0; i < MAX_VOICES; i++)
     {
@@ -81,23 +150,25 @@ void Synth_Init(void)
         voices[i].note           = 0;
         voices[i].env            = 0.0f;
         voices[i].envState       = ENV_IDLE;
-        voices[i].attackCoef     = 0.0f;
-        voices[i].decayCoef      = 0.0f;
+        voices[i].attackCoef     = cached_attackCoef;
+        voices[i].decayCoef      = cached_decayCoef;
         voices[i].sustainLevel   = 0.0f;
-        voices[i].releaseCoef    = 0.0f;
+        voices[i].releaseCoef    = cached_releaseCoef;
         voices[i].z1             = 0.0f;
         voices[i].z2             = 0.0f;
+        voices[i].b0             = cached_b0;
+        voices[i].b1             = cached_b1;
+        voices[i].b2             = cached_b2;
+        voices[i].a1             = cached_a1;
+        voices[i].a2             = cached_a2;
         voices[i].cutoff_smooth  = filter_params.cutoff;
         voices[i].last_cutoff    = filter_params.cutoff;
         voices[i].last_resonance = filter_params.resonance;
-        voices[i].releaseGuard   = 0;  // <--
-
-        calcFilterCoefs(&voices[i],
-                        filter_params.cutoff,
-                        filter_params.resonance);
+        voices[i].releaseGuard   = 0;
+        voices[i].fadeIn         = 1.0f;
     }
-    waveType = WAVE_SQUARE;
 }
+
 
 void Synth_SetWaveType(WaveType type)
 {
@@ -107,29 +178,36 @@ void Synth_SetWaveType(WaveType type)
 // ─── Note On ─────────────────────────────────────────────────────────────────
 void Synth_NoteOn(Voice *v, uint8_t note, float dPhase)
 {
-    EnvState prevState = v->envState;  // guardar estado ANTES de modificar
+    EnvState prevState = v->envState;
 
     v->note           = note;
     v->dPhase         = dPhase;
     v->active         = 1;
     v->env            = 0.0f;
     v->envState       = ENV_ATTACK;
-    v->attackCoef     = 1.0f / (adsr_params.attack * F_SAMPLE);
-    v->decayCoef      = calcCoef(adsr_params.decay);
+    v->attackCoef     = cached_attackCoef;
+    v->decayCoef      = cached_decayCoef;
     v->sustainLevel   = adsr_params.sustain;
-    v->releaseCoef    = calcCoef(adsr_params.release);
-    v->z1             = 0.0f;
-    v->z2             = 0.0f;
+    v->releaseCoef    = cached_releaseCoef;
+    v->releaseGuard   = 0;
+    v->fadeIn         = 0.0f;
+
+    if (prevState == ENV_IDLE)
+    {
+        v->z1    = 0.0f;
+        v->z2    = 0.0f;
+        v->phase = 0.0f;
+    }
+
+    // Asignar coefs de filtro cacheados — sin cosf/sinf en ISR
+    v->b0             = cached_b0;
+    v->b1             = cached_b1;
+    v->b2             = cached_b2;
+    v->a1             = cached_a1;
+    v->a2             = cached_a2;
     v->cutoff_smooth  = filter_params.cutoff;
     v->last_cutoff    = filter_params.cutoff;
     v->last_resonance = filter_params.resonance;
-    v->releaseGuard   = 0;
-
-    // Solo resetea la fase si la voz estaba completamente idle
-    if (prevState == ENV_IDLE)
-        v->phase = 0.0f;
-
-    calcFilterCoefs(v, filter_params.cutoff, filter_params.resonance);
 }
 
 // ─── Note Off ────────────────────────────────────────────────────────────────
@@ -138,10 +216,9 @@ void Synth_NoteOff(Voice *v)
     if (v->envState != ENV_IDLE)
     {
         v->envState    = ENV_RELEASE;
-        v->releaseCoef = calcCoef(adsr_params.release);
-        // FIX: garantizar que releaseCoef nunca sea 0 ni 1
+        v->releaseCoef = cached_releaseCoef;
         if (v->releaseCoef <= 0.0f || v->releaseCoef >= 1.0f)
-            v->releaseCoef = calcCoef(0.01f);
+            v->releaseCoef = powf(0.0001f, 1.0f / (0.01f * F_SAMPLE));
     }
 }
 
@@ -152,14 +229,10 @@ void Synth_UpdateActiveVoices(void)
     {
         if (voices[i].active)
         {
-            voices[i].decayCoef    = calcCoef(adsr_params.decay);
+            voices[i].attackCoef   = cached_attackCoef;
+            voices[i].decayCoef    = cached_decayCoef;
             voices[i].sustainLevel = adsr_params.sustain;
-            voices[i].releaseCoef  = calcCoef(adsr_params.release);
-
-            if (voices[i].envState == ENV_ATTACK)
-                voices[i].attackCoef = 1.0f / (adsr_params.attack * F_SAMPLE);
-
-            // ELIMINADO: calcFilterCoefs — ya no va aquí
+            voices[i].releaseCoef  = cached_releaseCoef;
         }
     }
 }
@@ -209,8 +282,8 @@ float ADSR_Apply(Voice *v, float sample)
     switch (v->envState)
     {
         case ENV_ATTACK:
-            v->env += v->attackCoef;
-            if (v->env >= 1.0f)
+            v->env += v->attackCoef * (1.0f - v->env);
+            if (v->env >= 0.9999f)
             {
                 v->env      = 1.0f;
                 v->envState = ENV_DECAY;
@@ -232,11 +305,10 @@ float ADSR_Apply(Voice *v, float sample)
 
         case ENV_RELEASE:
             v->env *= v->releaseCoef;
-            // FIX: doble condición de salida — por umbral Y por contador de seguridad
             v->releaseGuard++;
             if (v->env <= ENV_TARGET
                 || v->env < 0.0001f
-                || v->releaseGuard > (uint32_t)(5.0f * F_SAMPLE))  // máx 5 s
+                || v->releaseGuard > (uint32_t)(5.0f * F_SAMPLE))
             {
                 v->env          = 0.0f;
                 v->envState     = ENV_IDLE;
@@ -251,7 +323,6 @@ float ADSR_Apply(Voice *v, float sample)
             break;
     }
 
-    // LFO_AMPLITUDE — modula el nivel de salida
     if (synth_state.lfo == LFO_AMPLITUDE)
     {
         float amp_mod = 1.0f - lfo_params.depth * (lfo_state.value * 0.5f + 0.5f);
@@ -285,14 +356,20 @@ float Filter_Apply(Voice *v, float sample)
             break;
 
         default:
-            break;
+            // Sin LFO en filtro — usar coefs cacheados directamente
+            // sin ningún recálculo
+            v->b0 = cached_b0;
+            v->b1 = cached_b1;
+            v->b2 = cached_b2;
+            v->a1 = cached_a1;
+            v->a2 = cached_a2;
+            goto apply_biquad;
     }
 
-    // Suavizado exponencial del cutoff — sin trig, solo una MAC
+    // Solo llega aquí si LFO_CUTOFF o LFO_RESONANCE están activos
     v->cutoff_smooth += CUTOFF_SMOOTH_ALPHA *
                         (cutoff_target - v->cutoff_smooth);
 
-    // Recalcular coefs SOLO si el cambio es significativo
     float diff_c = v->cutoff_smooth - v->last_cutoff;
     if (diff_c < 0.0f) diff_c = -diff_c;
     float diff_r = resonance_mod - v->last_resonance;
@@ -300,16 +377,20 @@ float Filter_Apply(Voice *v, float sample)
 
     if (diff_c > COEF_UPDATE_THRESH || diff_r > 0.01f)
     {
+        // Este calcFilterCoefs solo se ejecuta cuando el LFO
+        // modula el filtro Y el cambio supera el umbral
         calcFilterCoefs(v, v->cutoff_smooth, resonance_mod);
         v->last_cutoff    = v->cutoff_smooth;
         v->last_resonance = resonance_mod;
     }
 
-    // Biquad directo — solo MACs, se ejecuta cada sample
-    float out = v->b0 * sample + v->z1;
-    v->z1     = v->b1 * sample - v->a1 * out + v->z2;
-    v->z2     = v->b2 * sample - v->a2 * out;
-    return out;
+apply_biquad:
+    {
+        float out = v->b0 * sample + v->z1;
+        v->z1     = v->b1 * sample - v->a1 * out + v->z2;
+        v->z2     = v->b2 * sample - v->a2 * out;
+        return out;
+    }
 }
 
 // ─── Render ──────────────────────────────────────────────────────────────────
@@ -318,5 +399,14 @@ float Synth_RenderVoiceSample(Voice *v)
     float sample = Oscillator_Generate(v);
     sample       = ADSR_Apply(v, sample);
     sample       = Filter_Apply(v, sample);
+
+    // Anti-click: fade-in lineal de FADE_IN_SAMPLES samples
+    if (v->fadeIn < 1.0f)
+    {
+        sample    *= v->fadeIn;
+        v->fadeIn += 1.0f / FADE_IN_SAMPLES;
+        if (v->fadeIn > 1.0f) v->fadeIn = 1.0f;
+    }
+
     return sample;
 }
