@@ -111,47 +111,6 @@ void MapNoteToLED(uint8_t note, uint8_t velocity) {
 }
 
 
-// Función auxiliar: roba la voz más "vieja" en release o la más silenciosa
-static Voice* StealVoice(void)
-{
-    Voice *best = NULL;
-    float minEnv = 2.0f;
-
-    // 1. Preferir voces en ENV_RELEASE (las más apagadas primero)
-    for (int i = 0; i < MAX_VOICES; i++)
-    {
-        if (voices[i].envState == ENV_RELEASE && voices[i].env < minEnv)
-        {
-            minEnv = voices[i].env;
-            best   = &voices[i];
-        }
-    }
-    if (best) return best;
-
-    // 2. Si no hay en release, preferir SUSTAIN o DECAY (nunca ATTACK)
-    minEnv = 2.0f;
-    for (int i = 0; i < MAX_VOICES; i++)
-    {
-        if (voices[i].envState != ENV_ATTACK && voices[i].env < minEnv)
-        {
-            minEnv = voices[i].env;
-            best   = &voices[i];
-        }
-    }
-    if (best) return best;
-
-    // 3. Último recurso: cualquier voz
-    minEnv = 2.0f;
-    for (int i = 0; i < MAX_VOICES; i++)
-    {
-        if (voices[i].env < minEnv)
-        {
-            minEnv = voices[i].env;
-            best   = &voices[i];
-        }
-    }
-    return best;
-}
 
 
 void USBD_MIDI_OnPacketsReceived(uint8_t *data, uint8_t len)
@@ -164,53 +123,28 @@ void USBD_MIDI_OnPacketsReceived(uint8_t *data, uint8_t len)
 
         if (msg == 0x09 && vel > 0)  // Note On
         {
-            Voice *target = NULL;
-
-            // 1. Reutilizar voz con la misma nota (retrigger)
-            for (int i = 0; i < MAX_VOICES; i++)
+            // Solo encolar — sin tocar voices[] directamente
+            uint8_t next = (event_queue_tail + 1) % EVENT_QUEUE_SIZE;
+            if (next != event_queue_head)
             {
-                if (voices[i].note == note && voices[i].active)
-                {
-                    target = &voices[i];
-                    break;
-                }
-            }
-
-            // 2. Buscar voz libre
-            if (!target)
-            {
-                for (int i = 0; i < MAX_VOICES; i++)
-                {
-                    if (!voices[i].active)
-                    {
-                        target = &voices[i];
-                        break;
-                    }
-                }
-            }
-
-            // 3. Voice stealing
-            if (!target)
-                target = StealVoice();
-
-            if (target)
-            {
-                // FIX: deshabilitar interrupciones de audio brevemente
-                // para que renderAudio no lea la voz a medias
-                __disable_irq();
-                Synth_NoteOn(target, note, NoteToFreq(note) / F_SAMPLE);
-                __enable_irq();
+                event_queue[event_queue_tail].note      = note;
+                event_queue[event_queue_tail].dPhase    = NoteToFreq(note) / F_SAMPLE;
+                event_queue[event_queue_tail].isNoteOff = 0;
+                event_queue[event_queue_tail].active    = 1;
+                event_queue_tail = next;
             }
         }
         else if (msg == 0x08 || (msg == 0x09 && vel == 0))  // Note Off
         {
-            __disable_irq();
-            for (int i = 0; i < MAX_VOICES; i++)
+            uint8_t next = (event_queue_tail + 1) % EVENT_QUEUE_SIZE;
+            if (next != event_queue_head)
             {
-                if (voices[i].active && voices[i].note == note)
-                    Synth_NoteOff(&voices[i]);
+                event_queue[event_queue_tail].note      = note;
+                event_queue[event_queue_tail].dPhase    = 0;
+                event_queue[event_queue_tail].isNoteOff = 1;
+                event_queue[event_queue_tail].active    = 1;
+                event_queue_tail = next;
             }
-            __enable_irq();
         }
 
         MapNoteToLED(note, vel);
@@ -281,6 +215,7 @@ int main(void)
 	CS43_SetVolume(40); //0 - 100,, 40
 	CS43_Enable_RightLeft(CS43_RIGHT_LEFT);
 	CS43_Start();
+	HAL_I2C_Master_Transmit(&hi2c1, 0x94, (uint8_t[]){0x0E, 0x00}, 2, 100);
 
   //Start transmission
   HAL_I2S_Transmit_DMA(&hi2s3, (uint16_t *)audioBuffer, 1024);
@@ -732,35 +667,28 @@ static void MX_GPIO_Init(void)
 
 void renderAudio(int16_t *buf, uint16_t frames)
 {
+    Synth_ProcessEventQueue();
+
     for (uint16_t i = 0; i < frames; i++)
     {
         LFO_Tick();
 
         float s = 0.0f;
-        int   activeCount = 0;
 
         for (int v = 0; v < MAX_VOICES; v++)
         {
             if (voices[v].active)
-            {
                 s += Synth_RenderVoiceSample(&voices[v]);
-                activeCount++;
-            }
         }
 
-        // FIX: dividir sólo entre voces activas para no perder volumen
-        // cuando hay pocas voces, pero evitar clipping con muchas
-        if (activeCount > 1)
-            s /= activeCount;
+        s *= (1.0f / MAX_VOICES);
 
-        // FIX: clamp explícito antes de convertir a int16
-                if      (s >  1.0f) s =  1.0f;
-                else if (s < -1.0f) s = -1.0f;
+        if      (s >  1.0f) s =  1.0f;
+        else if (s < -1.0f) s = -1.0f;
 
-                // Aplicar volumen
-                s *= ctrl_norm[CTRL_VOLUME];
+        s *= ctrl_norm[CTRL_VOLUME];
 
-                int16_t sampleOut = (int16_t)(s * 28000);  // headroom razonable
+        int16_t sampleOut = (int16_t)(s * 28000);
         buf[2*i]     = sampleOut;
         buf[2*i + 1] = sampleOut;
     }
