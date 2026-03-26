@@ -80,4 +80,18 @@ uint8_t        StateManager_GetLEDByte(void);
 const char*    StateManager_GetWaveName(void);
 const char*    StateManager_GetLFOName(void);
 
+// Coeficientes ADSR precalculados
+extern float cached_attackCoef;
+extern float cached_decayCoef;
+extern float cached_releaseCoef;
+
+// Coeficientes de filtro precalculados
+extern float cached_b0;
+extern float cached_b1;
+extern float cached_b2;
+extern float cached_a1;
+extern float cached_a2;
+
+void Parameter_ForceUpdate(void);
+
 #endif /* INC_MAPPING_H_ */
