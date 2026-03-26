@@ -11,9 +11,13 @@
 #include <stdint.h>
 
 // Número máximo de voces
-#define MAX_VOICES 8
-#define F_SAMPLE   48000.0f
+#define MAX_VOICES       8
+#define F_SAMPLE         48000.0f
+#define FADE_IN_SAMPLES  48
+#define EVENT_QUEUE_SIZE 16
+#define SINE_TABLE_SIZE  1024
 
+// ─── Enums ───────────────────────────────────────────────────────────────────
 typedef enum {
     WAVE_SINE = 0,
     WAVE_SQUARE,
@@ -29,68 +33,62 @@ typedef enum {
     ENV_RELEASE
 } EnvState;
 
-
-
+// ─── Structs ─────────────────────────────────────────────────────────────────
 typedef struct {
     uint8_t  note;
     uint8_t  active;
-
-    // Oscilador
-    float phase;
-    float dPhase;
-
-    // Envelope
+    float    phase;
+    float    dPhase;
     float    env;
     EnvState envState;
     float    attackCoef;
     float    decayCoef;
     float    sustainLevel;
     float    releaseCoef;
-
-    // Filtro biquad
-    float z1, z2;
-    float b0, b1, b2;
-    float a1, a2;
-
-    // Control de recálculo de coeficientes
+    float    z1, z2;
+    float    b0, b1, b2;
+    float    a1, a2;
     float    cutoff_smooth;
     float    last_cutoff;
     float    last_resonance;
-
-    // Guard de release
     uint32_t releaseGuard;
-
+    float    fadeIn;
 } Voice;
 
-// Estado global del LFO
 typedef struct {
-    float phase;       // 0.0 → 1.0
-    float value;       // salida actual -1.0 → 1.0
+    float phase;
+    float value;
 } LFOState;
 
+typedef struct {
+    uint8_t active;
+    uint8_t note;
+    float   dPhase;
+    uint8_t isNoteOff;
+} VoiceEvent;
+
+// ─── Variables globales ───────────────────────────────────────────────────────
+extern Voice    voices[MAX_VOICES];
 extern LFOState lfo_state;
+extern float    sine_table[SINE_TABLE_SIZE];
 
-// Variables globales accesibles externamente
-extern Voice voices[MAX_VOICES];
+extern volatile VoiceEvent event_queue[EVENT_QUEUE_SIZE];
+extern volatile uint8_t    event_queue_head;
+extern volatile uint8_t    event_queue_tail;
 
+// ─── Funciones públicas ───────────────────────────────────────────────────────
+void   Synth_Init(void);
+void   Synth_SetWaveType(WaveType type);
+void   Synth_NoteOn(Voice *v, uint8_t note, float dPhase);
+void   Synth_NoteOff(Voice *v);
+void   Synth_UpdateActiveVoices(void);
+void   Synth_ProcessEventQueue(void);
+float  Synth_RenderVoiceSample(Voice *v);
+Voice* StealVoice(void);
 
-// Funciones públicas
-void  Synth_Init(void);
-void  Synth_SetWaveType(WaveType type);
-void  Synth_NoteOn(Voice *v, uint8_t note, float dPhase);
-void  Synth_NoteOff(Voice *v);
-void  Synth_UpdateActiveVoices(void);
-float Synth_RenderVoiceSample(Voice *v);
-
-// Funciones de bloques internos de síntesis
 float Oscillator_Generate(Voice *v);
 float ADSR_Apply(Voice *v, float sample);
 float Filter_Apply(Voice *v, float sample);
-void LFO_Tick(void);
+void  LFO_Tick(void);
 
-
-
-// Tabla seno para oscilador eficiente
-#define SINE_TABLE_SIZE 1024
-extern float sine_table[SINE_TABLE_SIZE];
 #endif /* INC_SYNTH_H_ */
