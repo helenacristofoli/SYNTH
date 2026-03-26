@@ -1,22 +1,20 @@
-/*
- * Mapping.c
- *
- *  Created on: Feb 7, 2026
- *      Author: Helena
- *
- *  Mapeo de parámetros y máquina de estados (onda + LFO target)
- */
-
 #include "Mapping.h"
 #include "controls.h"
 #include "Synthesis.h"
 
-/* ================================================================
- * MAPEO DE PARÁMETROS
- * ================================================================ */
 FilterParams filter_params;
 LFOParams    lfo_params;
 ADSRParams   adsr_params;
+
+float cached_attackCoef  = 0.0f;
+float cached_decayCoef   = 0.0f;
+float cached_releaseCoef = 0.0f;
+
+float cached_b0 = 0.0f;
+float cached_b1 = 0.0f;
+float cached_b2 = 0.0f;
+float cached_a1 = 0.0f;
+float cached_a2 = 0.0f;
 
 static float map_param(float norm, float min, float max, ParamType type)
 {
@@ -35,8 +33,59 @@ static float map_param(float norm, float min, float max, ParamType type)
     }
 }
 
+static void recalc_filter_coefs(float cutoff, float Q)
+{
+    if (cutoff < 20.0f)    cutoff = 20.0f;
+    if (cutoff > 20000.0f) cutoff = 20000.0f;
+    if (Q < 0.5f)          Q = 0.5f;
+    if (Q > 20.0f)         Q = 20.0f;
+
+    float w0    = 2.0f * 3.14159f * cutoff / F_SAMPLE;
+    float cosw0 = cosf(w0);
+    float sinw0 = sinf(w0);
+    float alpha = sinw0 / (2.0f * Q);
+    float b0    = (1.0f - cosw0) / 2.0f;
+    float b1    =  1.0f - cosw0;
+    float b2    = (1.0f - cosw0) / 2.0f;
+    float a0    =  1.0f + alpha;
+    float a1    = -2.0f * cosw0;
+    float a2    =  1.0f - alpha;
+
+    cached_b0 = b0 / a0;
+    cached_b1 = b1 / a0;
+    cached_b2 = b2 / a0;
+    cached_a1 = a1 / a0;
+    cached_a2 = a2 / a0;
+}
+
+void Parameter_ForceUpdate(void)
+{
+    cached_attackCoef  = 1.0f - powf(0.0001f,
+                             1.0f / (adsr_params.attack  * F_SAMPLE));
+    cached_decayCoef   = powf(0.0001f,
+                             1.0f / (adsr_params.decay   * F_SAMPLE));
+    cached_releaseCoef = powf(0.0001f,
+                             1.0f / (adsr_params.release * F_SAMPLE));
+
+    recalc_filter_coefs(filter_params.cutoff, filter_params.resonance);
+}
+
 void Parameter_Update(void)
 {
+    static float prev_norm[CTRL_COUNT] = {0};
+    uint8_t changed = 0;
+
+    for (int i = 0; i < CTRL_COUNT; i++)
+    {
+        float diff = ctrl_norm[i] - prev_norm[i];
+        if (diff > 0.005f || diff < -0.005f)
+        {
+            prev_norm[i] = ctrl_norm[i];
+            changed = 1;
+        }
+    }
+    if (!changed) return;
+
     filter_params.cutoff    = map_param(ctrl_norm[CTRL_CUTOFF],
                                         20.0f, 20000.0f, PARAM_FREQ);
     filter_params.resonance = map_param(ctrl_norm[CTRL_RESONANCE],
@@ -53,9 +102,9 @@ void Parameter_Update(void)
                                         0.0001f, 1.0f, PARAM_GAIN);
     adsr_params.release     = map_param(ctrl_norm[CTRL_RELEASE],
                                         0.01f, 3.0f, PARAM_TIME);
+
+    Parameter_ForceUpdate();
 }
-
-
 
 // Tabla de máscaras LED por tipo de onda
 static const uint8_t wave_led_mask[4] = {
@@ -81,7 +130,6 @@ static const char* lfo_names[LFO_COUNT] = {
     "Amplitude", "Pitch", "Cutoff", "Resonance"
 };
 
-// Estado inicial
 SynthState synth_state = {
     .wave = WAVE_SINE,
     .lfo  = LFO_AMPLITUDE
@@ -123,12 +171,8 @@ const char* StateManager_GetLFOName(void)
     return lfo_names[synth_state.lfo];
 }
 
-/* ================================================================
- * INICIALIZACIÓN GENERAL
- * ================================================================ */
 void Parameter_Init(void)
 {
-    // Valores por defecto de parámetros
     filter_params.cutoff    = 1000.0f;
     filter_params.resonance = 1.0f;
     lfo_params.rate         = 1.0f;
@@ -138,6 +182,8 @@ void Parameter_Init(void)
     adsr_params.sustain     = 0.8f;
     adsr_params.release     = 0.5f;
 
-    // Inicializar estado de onda y LEDs
     StateManager_Init();
+
+    // Garantiza que los cached estén listos antes de Synth_Init()
+    Parameter_ForceUpdate();
 }
