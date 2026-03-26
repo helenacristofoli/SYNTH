@@ -97,7 +97,7 @@ void CS43_Init(I2C_HandleTypeDef i2c_handle, CS43_MODE outputMode)
 	}
 	else if(outputMode == CS43_MODE_I2S)
 	{
-		iData[1] = 0x02;
+		iData[1] = 0x00;
 	}
 	write_register(MISCELLANEOUS_CONTRLS,&iData[1]);
 	//(9): Unmute headphone and speaker
